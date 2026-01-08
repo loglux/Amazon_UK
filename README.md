@@ -45,6 +45,13 @@ scrapy crawl amazon_uk -a search="Intel NUC" -a category="computers" -a filter_w
 - `filter_mode`: Typically not required, as the default behavior is set to "all", filtering results that contain all specified filter words. However, if you want to change the behavior, set it to "any", which will filter results containing any of the specified filter words.
 - `exception_keywords`: Comma-separated list of words that act as negative filters. Results containing any of these words will be excluded. Default is an empty string.
 
+## Default crawler behavior
+
+- Randomizes User-Agent per request from a small desktop/mobile pool.
+- AutoThrottle enabled (start delay 2s, max 10s) with base `DOWNLOAD_DELAY=3` to stay polite.
+- `ROBOTSTXT_OBEY=False` because Amazon blocks search pages; keep delays as configured.
+- Deduplication normalizes both `/dp/` and `/gp/product/` links down to `https://www.amazon.co.uk/dp/<ASIN>`.
+
 ## Required Twisted Version
 
 This project was created and tested with a specific version of the Twisted library to ensure compatibility and proper functioning with the Scrapy spider. The required Twisted version for this project is **Twisted 22.10.0**.
@@ -82,4 +89,3 @@ Pull requests are welcome. For major changes, please open an issue first to disc
 ## License
 
 [MIT](https://choosealicense.com/licenses/mit/)
-

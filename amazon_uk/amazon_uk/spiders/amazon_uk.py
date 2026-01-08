@@ -1,3 +1,7 @@
+import logging
+
+import logging
+
 import scrapy
 from ..items import AmazonUkItem
 
@@ -11,9 +15,13 @@ class AmazonUKSpider(scrapy.Spider):
         super(AmazonUKSpider, self).__init__(*args, **kwargs)
         self.search_term = search
         self.category = category
-        self.filter_words = [word.strip() for word in filter_words.split(',')] if filter_words else []
-        self.exception_keywords = [word.strip() for word in exception_keywords.split(',')] if exception_keywords else []
-        self.filter_mode = filter_mode
+        self.filter_words = [word.strip() for word in filter_words.split(',') if word.strip()] if filter_words else []
+        self.exception_keywords = [word.strip() for word in exception_keywords.split(',') if word.strip()] if exception_keywords else []
+        self.filter_mode = filter_mode.lower()
+
+        allowed_modes = {"all", "any"}
+        if self.filter_mode not in allowed_modes:
+            raise ValueError(f"Unsupported filter_mode '{filter_mode}'. Use one of {allowed_modes}.")
 
     def start_requests(self):
         url = f'https://www.amazon.co.uk/s?k={self.search_term}'
@@ -28,11 +36,41 @@ class AmazonUKSpider(scrapy.Spider):
     def contains_filter_words(self, name):
         """Check if the product name contains filter words based on the selected filter_mode."""
         name_cf = name.casefold()
-        match self.filter_mode:
-            case "any":
-                return any(word.lower().casefold() in name_cf for word in self.filter_words)
-            case _:
-                return all(word.lower().casefold() in name_cf for word in self.filter_words)
+        if not self.filter_words:
+            return True
+        if self.filter_mode == "any":
+            return any(word.casefold() in name_cf for word in self.filter_words)
+        # Default to "all" when unrecognized filter_mode values are passed in
+        return all(word.casefold() in name_cf for word in self.filter_words)
+
+    def _normalize_text(self, text):
+        """Collapse whitespace and strip non-breaking spaces."""
+        return " ".join(text.replace("\xa0", " ").split())
+
+    def _extract_name(self, product_element):
+        name_parts = product_element.css('span.a-size-base-plus.a-color-base.a-text-normal::text').getall()
+        if not name_parts:
+            name_parts = product_element.css('span.a-size-medium.a-color-base::text').getall()
+        if not name_parts:
+            name_parts = product_element.css('h2 a span::text').getall()
+        name = self._normalize_text(''.join(name_parts)) if name_parts else ''
+        return name
+
+    def _extract_price(self, product_element):
+        price_text = product_element.css('span.a-price .a-offscreen::text').get()
+        if price_text:
+            return self._normalize_text(price_text)
+        whole = product_element.css('span.a-price-whole::text').get()
+        fraction = product_element.css('span.a-price-fraction::text').get()
+        if whole:
+            price = whole
+            if fraction:
+                price = f"{whole}.{fraction}"
+            return self._normalize_text(price)
+        range_price = product_element.css('span.a-price-range .a-offscreen::text').get()
+        if range_price:
+            return self._normalize_text(range_price)
+        return ''
 
     def parse(self, response):
         # Extract product details from the search results page
@@ -40,13 +78,11 @@ class AmazonUKSpider(scrapy.Spider):
         for product_element in product_elements:
             asin = product_element.attrib['data-asin']
             if asin:
-                name_parts = product_element.css('span.a-size-base-plus.a-color-base.a-text-normal::text').getall()
-                if not name_parts:
-                    name_parts = product_element.css('span.a-size-medium.a-color-base::text').getall()
-                name = ''.join(name_parts).strip()
-                price = product_element.css('span.a-price .a-offscreen::text').get()
+                name = self._extract_name(product_element)
+                price = self._extract_price(product_element)
                 voucher = product_element.css(
                     'span.a-size-base.s-highlighted-text-padding.aok-inline-block.s-coupon-highlight-color::text').get()
+                voucher = self._normalize_text(voucher) if voucher else ''
                 # Extract product link
                 link = product_element.css('a.a-link-normal::attr(href)').get()
                 if link:  # Make the link absolute if it's relative
@@ -64,12 +100,13 @@ class AmazonUKSpider(scrapy.Spider):
                     item['link'] = link
 
                     yield item
+                else:
+                    if not name or not price or not link:
+                        logging.debug(f"Skipping ASIN {asin}: name='{name}', price='{price}', link='{link}'")
             else:
                 continue
 
         # Follow pagination links if available
-        next_page = response.css('a.s-pagination-next::attr(href)').get()
+        next_page = response.css('a.s-pagination-next::attr(href)').get() or response.css('li.a-last a::attr(href)').get()
         if next_page:
             yield scrapy.Request(url=response.urljoin(next_page), callback=self.parse)
-
-

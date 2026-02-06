@@ -45,7 +45,7 @@ scrapy crawl amazon_uk -a search="Intel NUC" -a category="computers" -a filter_w
 - `filter_mode`: Typically not required, as the default behavior is set to "all", filtering results that contain all specified filter words. However, if you want to change the behavior, set it to "any", which will filter results containing any of the specified filter words.
 - `exception_keywords`: Comma-separated list of words that act as negative filters. Results containing any of these words will be excluded. Default is an empty string.
 
-## API wrapper (optional)
+## API wrapper
 
 - Install deps: `pip install -r requirements.txt`.
 - Run API (from repo root): `uvicorn api.main:app --reload --port 8000`.
@@ -62,7 +62,7 @@ scrapy crawl amazon_uk -a search="Intel NUC" -a category="computers" -a filter_w
 - LLM timeout can be configured via `LLM_TIMEOUT` (seconds, default 60) if your Ollama/API responses take longer.
  - UI/API timeout in Streamlit can be configured via `API_TIMEOUT` (seconds).
 
-## Optional Streamlit UI
+## Streamlit UI
 
 - Start API as above, then run UI from repo root: `streamlit run ui/app.py --server.port 8501`.
 - UI supports:

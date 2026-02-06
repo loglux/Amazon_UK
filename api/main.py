@@ -332,13 +332,12 @@ def _run_job(job_id: str, req: RunRequest):
             cmd,
             cwd=SCRAPER_WORKDIR,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
         )
 
         stdout_lines = []
-        stderr_lines = []
         if proc.stdout:
             for line in proc.stdout:
                 stdout_lines.append(line)
@@ -347,14 +346,6 @@ def _run_job(job_id: str, req: RunRequest):
                         job = JOBS.get(job_id)
                         if job:
                             job.stdout = "".join(stdout_lines)[-4000:]
-        if proc.stderr:
-            for line in proc.stderr:
-                stderr_lines.append(line)
-                if req.debug:
-                    with JOBS_LOCK:
-                        job = JOBS.get(job_id)
-                        if job:
-                            job.stderr = "".join(stderr_lines)[-4000:]
         returncode = proc.wait()
 
         with JOBS_LOCK:
@@ -363,7 +354,7 @@ def _run_job(job_id: str, req: RunRequest):
                 return
             job.output_path = str(out_path)
             job.stdout = "".join(stdout_lines)[-4000:]
-            job.stderr = "".join(stderr_lines)[-4000:]
+            job.stderr = ""
             job.finished_at = time.time()
             if returncode != 0:
                 job.status = "error"

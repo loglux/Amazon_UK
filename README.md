@@ -1,6 +1,7 @@
 # Amazon UK Scrapy Spider
 
 This repository contains a Scrapy spider designed to scrape product information from Amazon UK based on provided search terms, categories, and filters.
+It also includes an AI-assisted API/UI that turns free-text requests into crawl parameters before running the scrape.
 
 ## Features
 

@@ -50,12 +50,17 @@ scrapy crawl amazon_uk -a search="Intel NUC" -a category="computers" -a filter_w
 
 - Install deps: `pip install -r requirements.txt`.
 - Run API (from repo root): `uvicorn api.main:app --reload --port 8000`.
+- Docker (API+UI): `docker build -t amazon-uk-scraper .` then `docker run --name amazon-uk-scraper --env-file .env -p 18000:8000 -p 18501:8501 amazon-uk-scraper`.
 - Endpoints:
   - `POST /interpret` — optional LLM-backed conversion of free text into crawl params. Configure via env: `LLM_BACKEND=ollama|openai`, `LLM_ENDPOINT`, `LLM_MODEL`, `LLM_API_KEY` (for OpenAI). If unset, falls back to using the prompt as `search`.
     - If the LLM response is invalid JSON, the API returns 502 (no silent fallback).
   - `POST /crawl` — runs the Scrapy spider with JSON params (`search`, `category`, `filter_words`, `filter_mode`, `exception_keywords`, optional `CLOSESPIDER_*`, `CONCURRENT_REQUESTS`, `LOG_LEVEL`, `output`). Returns path to CSV and stdout/stderr.
   - `POST /run` — one-step interpret + crawl; set `dev_mode=true` to only return interpreted params (developer/diagnostic mode).
     - Accepts optional overrides: `closespider_itemcount`, `closespider_pagecount`, `concurrent_requests`, `log_level`.
+    - Async by default: returns `job_id`. Check `GET /jobs/{job_id}` for status/results. Set `async_mode=false` to run synchronously.
+    - Set `debug=true` to stream crawl stdout/stderr into job status (last ~4KB).
+  - `GET /jobs/{job_id}` — check async job status and results.
+  - `GET /jobs` — list recent async jobs (in-memory).
   - `GET /health` — basic health info and which LLM backend is active.
 - Output CSVs land in `amazon_uk/runs/` by default.
 - Offline QA (saved HTML): `python scripts/qa_parse_html.py --html /path/to/search.html --out amazon_uk/runs/qa.csv`

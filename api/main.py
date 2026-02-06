@@ -2,6 +2,9 @@ import json
 import os
 import subprocess
 import time
+import uuid
+from dataclasses import dataclass, field
+from threading import Lock, Thread
 from pathlib import Path
 from typing import List, Literal, Optional
 
@@ -60,6 +63,8 @@ class RunRequest(BaseModel):
     closespider_pagecount: Optional[int] = Field(default=None, description="Stop after crawling N pages")
     concurrent_requests: Optional[int] = Field(default=None, description="Override CONCURRENT_REQUESTS")
     log_level: Optional[str] = Field(default=None, description="Override Scrapy LOG_LEVEL")
+    async_mode: bool = Field(default=True, description="If true, run interpret+crawl asynchronously and return a job id")
+    debug: bool = Field(default=False, description="Stream crawl stdout/stderr into job status for debugging")
 
 
 class LLMClient:
@@ -69,6 +74,7 @@ class LLMClient:
         self.api_key = os.getenv("LLM_API_KEY", "")
         self.model = os.getenv("LLM_MODEL", "llama3")
         self.timeout = float(os.getenv("LLM_TIMEOUT", "60"))
+        self.schema_mode = os.getenv("LLM_SCHEMA_MODE", "auto").lower()  # auto|strict|off
 
     def interpret(
         self,
@@ -89,12 +95,24 @@ class LLMClient:
         if not backend:
             return CrawlParams(search=prompt)
 
+        start = time.time()
+        print(f"LLM call start: backend={backend} model={model} timeout={timeout}")
         try:
             if backend == "ollama":
-                return self._interpret_ollama(prompt, endpoint, model, timeout)
+                result = self._interpret_ollama(prompt, endpoint, model, timeout)
+                print(f"LLM call success: backend={backend} elapsed={time.time() - start:.2f}s")
+                return result
             if backend == "openai":
-                return self._interpret_openai(prompt, endpoint, model, api_key, timeout)
+                result = self._interpret_openai(prompt, endpoint, model, api_key, timeout)
+                print(f"LLM call success: backend={backend} elapsed={time.time() - start:.2f}s")
+                return result
+        except requests.Timeout as exc:
+            elapsed = time.time() - start
+            print(f"LLM call timeout: backend={backend} elapsed={elapsed:.2f}s")
+            raise HTTPException(status_code=504, detail=f"LLM call timed out after {elapsed:.2f}s") from exc
         except Exception as exc:  # pragma: no cover - defensive
+            elapsed = time.time() - start
+            print(f"LLM call failed: backend={backend} elapsed={elapsed:.2f}s error={exc}")
             raise HTTPException(status_code=502, detail=f"LLM call failed: {exc}") from exc
 
         # Unknown backend: use fallback.
@@ -126,8 +144,55 @@ class LLMClient:
             ],
             "temperature": 0.2,
         }
-        resp = requests.post(f"{endpoint}/v1/chat/completions", headers=headers, json=payload, timeout=timeout)
-        resp.raise_for_status()
+        if self.schema_mode != "off":
+            payload["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "crawl_params",
+                    "strict": True,
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "search": {"type": "string"},
+                            "category": {"type": ["string", "null"]},
+                            "filter_words": {"type": "array", "items": {"type": "string"}},
+                            "filter_mode": {"type": "string", "enum": ["all", "any"]},
+                            "exception_keywords": {"type": "array", "items": {"type": "string"}},
+                            "closespider_itemcount": {"type": ["integer", "null"]},
+                            "closespider_pagecount": {"type": ["integer", "null"]},
+                            "concurrent_requests": {"type": ["integer", "null"]},
+                            "log_level": {"type": "string", "enum": ["INFO", "DEBUG"]},
+                            "output": {"type": ["string", "null"]},
+                        },
+                        "required": [
+                            "search",
+                            "category",
+                            "filter_words",
+                            "filter_mode",
+                            "exception_keywords",
+                            "closespider_itemcount",
+                            "closespider_pagecount",
+                            "concurrent_requests",
+                            "log_level",
+                            "output",
+                        ],
+                        "additionalProperties": False,
+                    },
+                },
+            }
+        url = f"{endpoint}/v1/chat/completions"
+        try:
+            resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
+            resp.raise_for_status()
+        except requests.HTTPError as exc:
+            # Some OpenAI-compatible providers (e.g., DeepSeek) don't support response_format=json_schema.
+            if self.schema_mode == "auto" and exc.response is not None and exc.response.status_code == 400:
+                print("LLM response_format rejected; retrying without schema enforcement.")
+                payload.pop("response_format", None)
+                resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
+                resp.raise_for_status()
+            else:
+                raise
         choices = resp.json().get("choices", [])
         text = choices[0]["message"]["content"] if choices else ""
         return self._parse_params(text, prompt)
@@ -184,6 +249,25 @@ RUNS_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/runs", StaticFiles(directory=RUNS_DIR), name="runs")
 
 
+@dataclass
+class JobInfo:
+    id: str
+    status: str = "pending"  # pending|running|done|error
+    created_at: float = field(default_factory=time.time)
+    started_at: float | None = None
+    finished_at: float | None = None
+    prompt: str | None = None
+    params: CrawlParams | None = None
+    output_path: str | None = None
+    stdout: str = ""
+    stderr: str = ""
+    error: str | None = None
+
+
+JOBS: dict[str, JobInfo] = {}
+JOBS_LOCK = Lock()
+
+
 def _slugify(text: str) -> str:
     cleaned = "".join(ch if ch.isalnum() else "_" for ch in text.strip().lower())
     return cleaned.strip("_") or "search"
@@ -208,6 +292,100 @@ def build_scrapy_command(params: CrawlParams, output_path: Path) -> List[str]:
         cmd += ["-s", f"CONCURRENT_REQUESTS={params.concurrent_requests}"]
     cmd += ["-o", str(output_path)]
     return cmd
+
+
+def _run_job(job_id: str, req: RunRequest):
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if not job:
+            return
+        job.status = "running"
+        job.started_at = time.time()
+
+    try:
+        params = llm_client.interpret(
+            req.prompt,
+            backend=req.llm_backend,
+            endpoint=req.llm_endpoint,
+            model=req.llm_model,
+            api_key=req.llm_api_key,
+            timeout=req.llm_timeout,
+        )
+        with JOBS_LOCK:
+            job = JOBS.get(job_id)
+            if not job:
+                return
+            job.params = params
+
+        if req.dev_mode:
+            with JOBS_LOCK:
+                job = JOBS.get(job_id)
+                if not job:
+                    return
+                job.status = "done"
+                job.finished_at = time.time()
+            return
+
+        out_path = RUNS_DIR / f"{_slugify(params.search)}-{int(time.time())}.csv"
+        cmd = build_scrapy_command(params, out_path)
+        proc = subprocess.Popen(
+            cmd,
+            cwd=SCRAPER_WORKDIR,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+
+        stdout_lines = []
+        stderr_lines = []
+        if proc.stdout:
+            for line in proc.stdout:
+                stdout_lines.append(line)
+                if req.debug:
+                    with JOBS_LOCK:
+                        job = JOBS.get(job_id)
+                        if job:
+                            job.stdout = "".join(stdout_lines)[-4000:]
+        if proc.stderr:
+            for line in proc.stderr:
+                stderr_lines.append(line)
+                if req.debug:
+                    with JOBS_LOCK:
+                        job = JOBS.get(job_id)
+                        if job:
+                            job.stderr = "".join(stderr_lines)[-4000:]
+        returncode = proc.wait()
+
+        with JOBS_LOCK:
+            job = JOBS.get(job_id)
+            if not job:
+                return
+            job.output_path = str(out_path)
+            job.stdout = "".join(stdout_lines)[-4000:]
+            job.stderr = "".join(stderr_lines)[-4000:]
+            job.finished_at = time.time()
+            if returncode != 0:
+                job.status = "error"
+                job.error = "Scrapy crawl failed"
+            else:
+                job.status = "done"
+    except Exception as exc:
+        with JOBS_LOCK:
+            job = JOBS.get(job_id)
+            if not job:
+                return
+            job.status = "error"
+            job.error = str(exc)
+            job.finished_at = time.time()
+
+
+def _create_job(prompt: str) -> JobInfo:
+    job_id = uuid.uuid4().hex
+    job = JobInfo(id=job_id, prompt=prompt)
+    with JOBS_LOCK:
+        JOBS[job_id] = job
+    return job
 
 
 @app.post("/interpret", response_model=CrawlParams)
@@ -254,6 +432,12 @@ def crawl(params: CrawlParams) -> CrawlResponse:
 
 @app.post("/run")
 def run(req: RunRequest):
+    if req.async_mode:
+        job = _create_job(req.prompt)
+        thread = Thread(target=_run_job, args=(job.id, req), daemon=True)
+        thread.start()
+        return {"job_id": job.id, "status": job.status}
+
     params = llm_client.interpret(
         req.prompt,
         backend=req.llm_backend,
@@ -278,6 +462,43 @@ def run(req: RunRequest):
     # Execute crawl with interpreted params
     crawl_resp = crawl(params)
     return {"mode": "run", "params": params.dict(), "crawl": crawl_resp}
+
+
+@app.get("/jobs/{job_id}")
+def job_status(job_id: str):
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        return {
+            "id": job.id,
+            "status": job.status,
+            "created_at": job.created_at,
+            "started_at": job.started_at,
+            "finished_at": job.finished_at,
+            "prompt": job.prompt,
+            "params": job.params.model_dump() if job.params else None,
+            "output_path": job.output_path,
+            "stdout": job.stdout,
+            "stderr": job.stderr,
+            "error": job.error,
+        }
+
+
+@app.get("/jobs")
+def jobs_list():
+    with JOBS_LOCK:
+        return [
+            {
+                "id": job.id,
+                "status": job.status,
+                "created_at": job.created_at,
+                "prompt": job.prompt,
+                "output_path": job.output_path,
+                "error": job.error,
+            }
+            for job in JOBS.values()
+        ]
 
 
 @app.get("/health")

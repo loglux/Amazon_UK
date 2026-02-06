@@ -45,12 +45,47 @@ scrapy crawl amazon_uk -a search="Intel NUC" -a category="computers" -a filter_w
 - `filter_mode`: Typically not required, as the default behavior is set to "all", filtering results that contain all specified filter words. However, if you want to change the behavior, set it to "any", which will filter results containing any of the specified filter words.
 - `exception_keywords`: Comma-separated list of words that act as negative filters. Results containing any of these words will be excluded. Default is an empty string.
 
+## API wrapper (optional)
+
+- Install deps: `pip install -r requirements.txt`.
+- Run API (from repo root): `uvicorn api.main:app --reload --port 8000`.
+- Endpoints:
+  - `POST /interpret` — optional LLM-backed conversion of free text into crawl params. Configure via env: `LLM_BACKEND=ollama|openai`, `LLM_ENDPOINT`, `LLM_MODEL`, `LLM_API_KEY` (for OpenAI). If unset, falls back to using the prompt as `search`.
+    - If the LLM response is invalid JSON, the API returns 502 (no silent fallback).
+  - `POST /crawl` — runs the Scrapy spider with JSON params (`search`, `category`, `filter_words`, `filter_mode`, `exception_keywords`, optional `CLOSESPIDER_*`, `CONCURRENT_REQUESTS`, `LOG_LEVEL`, `output`). Returns path to CSV and stdout/stderr.
+  - `POST /run` — one-step interpret + crawl; set `dev_mode=true` to only return interpreted params (developer/diagnostic mode).
+    - Accepts optional overrides: `closespider_itemcount`, `closespider_pagecount`, `concurrent_requests`, `log_level`.
+  - `GET /health` — basic health info and which LLM backend is active.
+- Output CSVs land in `amazon_uk/runs/` by default.
+- Offline QA (saved HTML): `python scripts/qa_parse_html.py --html /path/to/search.html --out amazon_uk/runs/qa.csv`
+- Online QA (API): `python scripts/qa_online.py --api http://localhost:8000 --pagecount 2`
+- LLM timeout can be configured via `LLM_TIMEOUT` (seconds, default 60) if your Ollama/API responses take longer.
+ - UI/API timeout in Streamlit can be configured via `API_TIMEOUT` (seconds).
+
+## Optional Streamlit UI
+
+- Start API as above, then run UI from repo root: `streamlit run ui/app.py --server.port 8501`.
+- UI supports:
+  - Free-text task → interpret (+ crawl if not in dev mode).
+  - Manual overrides for search/category/filters/limits.
+  - Viewing stdout/stderr and output path.
+  - Switching between run/dev (interpret-only) modes.
+- LLM config: set envs (or use UI sidebar overrides):
+  - Ollama: `LLM_BACKEND=ollama`, `LLM_ENDPOINT=http://<ollama_host>:11434`, `LLM_MODEL=llama3.2`, `LLM_TIMEOUT=300`
+  - OpenAI-like: `LLM_BACKEND=openai`, `LLM_ENDPOINT=https://api.deepseek.com` (or your provider), `LLM_MODEL=<model>`, `LLM_API_KEY=<key>`, `LLM_TIMEOUT=120`
+  - See `.env.example` for a template; do not commit real keys.
+
 ## Default crawler behavior
 
 - Randomizes User-Agent per request from a small desktop/mobile pool.
 - AutoThrottle enabled (start delay 2s, max 10s) with base `DOWNLOAD_DELAY=3` to stay polite.
 - `ROBOTSTXT_OBEY=False` because Amazon blocks search pages; keep delays as configured.
-- Deduplication normalizes both `/dp/` and `/gp/product/` links down to `https://www.amazon.co.uk/dp/<ASIN>`.
+- Deduplication normalizes `/dp/`, `/gp/product/`, and `sspa`/sponsored links (extracting the ASIN from `url=`) down to `https://www.amazon.co.uk/dp/<ASIN>`.
+- Optional flags:
+  - `SKIP_SPONSORED=1` (default) drops sponsored blocks early.
+  - `ALLOW_EMPTY_PRICE=1` keeps items without a price and marks `missing_price=yes`.
+  - `LOG_DROPS=1` writes `runs/drops-<ts>.csv` with drop reason details.
+  - `DEBUG_SAVE_EMPTY_HTML=1` saves empty/captcha pages to `runs/empty-<ts>.html`.
 
 ## Required Twisted Version
 

@@ -13,3 +13,5 @@ class AmazonUkItem(scrapy.Item):
     price = scrapy.Field()
     voucher = scrapy.Field()
     link = scrapy.Field()
+    sponsored = scrapy.Field()
+    missing_price = scrapy.Field()

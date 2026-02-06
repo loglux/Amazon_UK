@@ -1,0 +1,6 @@
+scrapy==2.10.0
+Twisted==22.10.0
+fastapi==0.115.2
+uvicorn[standard]==0.30.6
+requests==2.32.5
+streamlit==1.40.1
